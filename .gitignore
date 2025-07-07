@@ -1,0 +1,8 @@
+cmds.txt
+.terraform
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.pem
+node_modules/
+config.env

@@ -1,0 +1,126 @@
+name: Intern Demo Version Creator
+
+on:
+  workflow_dispatch:
+    inputs:
+      CLIENT_NAME:
+        description: "CLIENT NAME"
+        required: true
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0  
+
+      - name: Replace client name in terraform.tfvars
+        run: |
+          sed -i "s/client/${{ github.event.inputs.CLIENT_NAME }}/g" terraform.tfvars
+          cat terraform.tfvars
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Save Terraform output to file
+        run: |
+          terraform output -raw vm_public_ip | grep -oP '\d+\.\d+\.\d+\.\d+' | head -n 1 > vm_public_ip.txt
+
+      - name: Upload vm_public_ip as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-public-ip
+          path: vm_public_ip.txt
+
+  deploy:
+    needs: terraform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Download vm_public_ip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-public-ip
+
+      - name: Read the IP from the artifact and set it as environment variable
+        id: read_ip
+        run: |
+          VM_IP=$(cat vm_public_ip.txt)
+          echo "vm_public_ip=$VM_IP" >> $GITHUB_ENV
+
+      - name: Create PEM file and set permissions
+        run: |
+          echo "${{ secrets.PEM_FILE }}" > $GITHUB_WORKSPACE/private-key.pem
+          chmod 600 $GITHUB_WORKSPACE/private-key.pem
+
+      - name: Set up environment variables
+        run: |
+          echo "VM_IP=${{ env.vm_public_ip }}" >> $GITHUB_ENV
+
+      - name: Generate Ansible hosts file
+        run: |
+          mkdir -p ansible
+          echo "[all]" > ansible/hosts.ini
+          echo "${{ env.vm_public_ip }} ansible_user=ubuntu ansible_ssh_private_key_file=$GITHUB_WORKSPACE/private-key.pem" >> ansible/hosts.ini
+          cat ansible/hosts.ini
+
+      - name: Run Ansible playbook
+        run: |
+          cd ansible
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > vault_pass.txt
+          ansible-playbook create_app.yml -i hosts.ini --vault-password-file=vault_pass.txt \
+          --extra-vars "client=${{ github.event.inputs.CLIENT_NAME }}"
+        env:
+          ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+
+      - name: Clean up sensitive files
+        run: |
+          rm -f $GITHUB_WORKSPACE/private-key.pem
+          rm -f ansible/vault_pass.txt
+
+  notify:
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download vm_public_ip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-public-ip
+
+      - name: Read the IP from the artifact and set it as environment variable
+        id: read_ip
+        run: |
+          VM_IP=$(cat vm_public_ip.txt)
+          echo "vm_public_ip=$VM_IP" >> $GITHUB_ENV
+
+      - name: Send notification to Discord
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d "{\"content\": \"**✅ POC Demo Deployed Successfully for ${{ github.event.inputs.CLIENT_NAME }}**!\\n\\n\
+                              💻 **IP Address**: \`${{ env.vm_public_ip }}\`\\n\\n\
+                              🚀 **Please check the application if everything looks good**\"}" \
+          ${{ secrets.DISCORD_DEMO_WEBHOOK_URL }}
+

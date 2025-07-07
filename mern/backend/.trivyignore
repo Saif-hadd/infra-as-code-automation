@@ -1,0 +1,3 @@
+CVE-2023-31484  # perl-base
+CVE-2023-45853  # zlib1g
+CVE-2024-21538  # cross-spawn

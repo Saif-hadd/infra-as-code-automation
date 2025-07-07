@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: saifeddine 
+      POSTGRES_DB: test
+    ports:
+      - "5440:5432"  # Le port exposé sur l'hôte
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bridge
+
+volumes:
+  postgres_data:
+
+networks:
+  bridge:
+    driver: bridge

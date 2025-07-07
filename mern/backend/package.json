@@ -1,0 +1,25 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "Node.js, Express, and POSTGRES REST CRUD API",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.19.2",
+    "pg": "^8.14.1"
+  },
+  "overrides": {
+    "http-cache-semantics": "^4.1.1",
+    "semver": "^7.5.2",
+    "cross-spawn": "^7.0.5"
+  }
+}

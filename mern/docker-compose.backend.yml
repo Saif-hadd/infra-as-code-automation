@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./backend
+    command: npm start  # Attendre que PostgreSQL soit prêt avant de démarrer
+    ports:
+      - "5050:5050"
+    networks:
+      - bridge
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=saifeddine
+      - DB_NAME=test
+    depends_on:
+      - postgres  # Le backend dépend de la base de données
+    env_file:
+      - .env
+
+networks:
+  bridge:
+    driver: bridge

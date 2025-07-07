@@ -1,0 +1,279 @@
+- name: Deploy Demo MES App on VM
+  hosts: all
+  become: true
+
+  vars_files:
+    - secret.yml
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Update APT cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Add user to Docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: "0755"
+
+    - name: Verify Docker installation
+      command: docker --version
+
+    - name: Verify Docker Compose installation
+      command: docker-compose --version
+
+    - name: Login to Docker Hub
+      docker_login:
+        registry: "https://index.docker.io/v1/"
+        username: "{{ dockerhub_username }}"
+        password: "{{ dockerhub_password }}"
+
+    - name: Create directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/app
+        - /opt/app/db
+        - /opt/app/backend
+        - /opt/app/frontend
+        - /opt/app/monitoring
+
+    - name: Create /opt/app/db/data with 777 permissions
+      file:
+        path: /opt/app/db/data
+        state: directory
+        mode: "0777"
+
+    - name: Create shared Docker network
+      docker_network:
+        name: vs_network
+        driver: bridge
+        state: present
+
+    - name: Create docker-compose.yaml for database
+      copy:
+        dest: /opt/app/db/docker-compose.yaml
+        content: |
+          services:
+            postgres:
+              container_name: postgres_db
+              image: postgres:latest
+              ports:
+                - "10101:5432"
+              environment:
+                POSTGRES_USER: "{{ database_username }}"
+                POSTGRES_PASSWORD: "{{ database_password }}"
+                POSTGRES_DB: "{{ database_name }}"
+              restart: always
+              volumes:
+                - /opt/app/db/data:/var/lib/postgresql/data
+              networks:
+                - vs_network
+          networks:
+            vs_network:
+              external: true
+
+    - name: Create .env file for backend
+      copy:
+        dest: /opt/app/backend/.env
+        content: |
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          POSTGRES_USERNAME={{ database_username }}
+          POSTGRES_PASSWORD={{ database_password }}
+          POSTGRES_DB={{ database_name }}
+
+    - name: Create docker-compose.yaml for backend
+      copy:
+        dest: /opt/app/backend/docker-compose.yaml
+        content: |
+          services:
+            demo_core_api:
+              image: docker.io/{{ dockerhub_username }}/backend:latest
+              container_name: demo_backend
+              ports:
+                - "5555:5050"
+              env_file:
+                - /opt/app/backend/.env
+              networks:
+                - vs_network
+              restart: always
+          networks:
+            vs_network:
+              external: true
+
+    - name: Create docker-compose.yaml for frontend
+      copy:
+        dest: /opt/app/frontend/docker-compose.yaml
+        content: |
+          services:
+            demo_mes_apps:
+              image: docker.io/{{ dockerhub_username }}/frontend:latest
+              container_name: staging_vbsmart_app
+              ports:
+                - "4444:5173"
+              networks:
+                - vs_network
+              restart: always
+          networks:
+            vs_network:
+              external: true
+
+    - name: Start postgres service
+      command: docker-compose -f /opt/app/db/docker-compose.yaml up -d
+      args:
+        chdir: /opt/app/db
+
+    - name: Wait for PostgreSQL to be ready
+      shell: |
+        until docker exec postgres_db pg_isready -h localhost -p 5432 -U {{ database_username }}; do
+          sleep 2
+        done
+      register: db_ready_status
+      retries: 10
+      delay: 5
+      failed_when: db_ready_status.rc != 0
+
+    - name: Verify backend can resolve postgres service
+      shell: |
+        docker run --rm --network vs_network alpine ping -c 3 postgres
+      args:
+        executable: /bin/bash
+      register: ping_result
+      failed_when: ping_result.rc != 0
+
+    - name: Create the database if it does not exist
+      shell: |
+        docker exec -i postgres_db psql -U {{ database_username }} -tAc "SELECT 1 FROM pg_database WHERE datname='{{ database_name }}'" | grep -q 1 || docker exec -i postgres_db psql -U {{ database_username }} -c "CREATE DATABASE {{ database_name }};"
+      args:
+        executable: /bin/bash
+      register: db_create_result
+      changed_when: db_create_result.stdout != '1'
+
+    - name: Create 'records' table if it doesn't exist
+      shell: |
+        docker exec -i postgres_db psql -U {{ database_username }} -d {{ database_name }} -c "
+        CREATE TABLE IF NOT EXISTS records (
+          id SERIAL PRIMARY KEY,
+          name TEXT NOT NULL,
+          position TEXT NOT NULL,
+          level TEXT NOT NULL
+        );
+        "
+      args:
+        executable: /bin/bash
+
+    - name: Start backend service
+      command: docker-compose -f /opt/app/backend/docker-compose.yaml up -d
+      args:
+        chdir: /opt/app/backend
+
+    - name: Start frontend service
+      command: docker-compose -f /opt/app/frontend/docker-compose.yaml up -d
+      args:
+        chdir: /opt/app/frontend
+
+    - name: Create docker-compose.yaml for monitoring
+      copy:
+        dest: /opt/app/monitoring/docker-compose.yaml
+        content: |
+          version: '3'
+          services:
+            prometheus:
+              image: prom/prometheus:latest
+              container_name: prometheus
+              ports:
+                - "9090:9090"
+              volumes:
+                - /opt/app/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+              networks:
+                - vs_network
+              restart: always
+
+            grafana:
+              image: grafana/grafana:latest
+              container_name: grafana
+              ports:
+                - "3000:3000"
+              networks:
+                - vs_network
+              restart: always
+
+            node_exporter:
+              image: prom/node-exporter:latest
+              container_name: node_exporter
+              ports:
+                - "9100:9100"
+              networks:
+                - vs_network
+              restart: always
+
+            postgres_exporter:
+              image: prometheuscommunity/postgres-exporter
+              container_name: postgres_exporter
+              ports:
+                - "9187:9187"
+              environment:
+                DATA_SOURCE_NAME: "postgresql://{{ database_username }}:{{ database_password }}@postgres:5432/{{ database_name }}?sslmode=disable"
+              networks:
+                - vs_network
+              restart: always
+
+          networks:
+            vs_network:
+              external: true
+
+    - name: Create prometheus.yml configuration
+      copy:
+        dest: /opt/app/monitoring/prometheus.yml
+        content: |
+          global:
+            scrape_interval: 15s
+          scrape_configs:
+            - job_name: 'node_exporter'
+              static_configs:
+                - targets: ['node_exporter:9100']
+            - job_name: 'postgres_exporter'
+              static_configs:
+                - targets: ['postgres_exporter:9187']
+
+    - name: Start monitoring services
+      command: docker-compose -f /opt/app/monitoring/docker-compose.yaml up -d
+      args:
+        chdir: /opt/app/monitoring
